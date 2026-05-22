@@ -30,7 +30,7 @@ impl SqliteSnDB {
     pub async fn new_by_path(path: &str) -> SnResult<SqliteSnDB> {
         let pool = SqlPool::open(
             format!("sqlite://{}", path).as_str(),
-            300,
+            8,
             Some(SqliteJournalMode::Wal),
         )
         .await
