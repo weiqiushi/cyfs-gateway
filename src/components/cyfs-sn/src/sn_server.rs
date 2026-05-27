@@ -43,7 +43,7 @@ const CLEAR_STATE_ACTIVE_CODE: &str = "zX6cV7bN8mK9lJ0hG1fD";
 const RESERVED_USER_NAMES_FILE_ENV: &str = "BUCKYOS_SN_RESERVED_NAMES_FILE";
 const RESERVED_USER_NAMES_FILE: &str = "reserved_user_names.txt";
 const SN_QUERY_POSITIVE_TTL_SECS: u64 = 60;
-const SN_QUERY_NEGATIVE_TTL_SECS: u64 = 15;
+const SN_QUERY_NEGATIVE_TTL_SECS: u64 = 30;
 
 fn is_filtered_zonegate_ip(ip: IpAddr) -> bool {
     match ip {
