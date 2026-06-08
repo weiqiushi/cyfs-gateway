@@ -58,6 +58,8 @@ clap = "4.5.54"
 chrono = { version = "0.4.39", features = ["serde"] }
 # 加密
 sha2 = "0.10.9"
+rsa = { version = "0.9", default-features = false, features = ["std", "sha2", "pem"] }
+rand08 = { package = "rand", version = "0.8" }
 jsonwebtoken = { version = "10", features = ["rust_crypto"] }
 # TLS
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
@@ -65,9 +67,9 @@ tokio-rustls = "0.26.1"
 rustls-pemfile = "2.0"
 rustls-platform-verifier = "0.6.1"
 ring = "0.17"
-openssl = { version = "0.10", features = ["vendored"] }
 # 证书生成
 rcgen = { version = "0.14", features = ["pem", "x509-parser"] }
+x509-parser = "0.18.1"
 # 其他工具
 toml = "0.8.23"
 regex = "1.12.2"
@@ -79,6 +81,16 @@ buckyos-kit = { git = "https://github.com/buckyos/buckyos-base.git", branch = "m
 kRPC = { git = "https://github.com/buckyos/buckyos-base.git", branch = "main", package = "kRPC" }
 name-client = { git = "https://github.com/buckyos/buckyos-base.git", branch = "main", package = "name-client" }
 name-lib = { git = "https://github.com/buckyos/buckyos-base.git", branch = "main", package = "name-lib" }
+
+[patch.crates-io]
+sfo-js = { path = "../vendor/sfo-js-no-fetch" }
+
+[patch."https://github.com/buckyos/cyfs-ndn.git"]
+fs-buffer = { path = "../vendor/cyfs-ndn-rustls/src/fs_buffer" }
+named_store = { path = "../vendor/cyfs-ndn-rustls/src/named_store" }
+ndm = { path = "../vendor/cyfs-ndn-rustls/src/ndm" }
+ndm-lib = { path = "../vendor/cyfs-ndn-rustls/src/ndm-lib" }
+ndn-lib = { path = "../vendor/cyfs-ndn-rustls/src/ndn-lib" }
 
 [profile.test]
 debug = 0

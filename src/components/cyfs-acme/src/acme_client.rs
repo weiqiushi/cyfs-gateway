@@ -1,12 +1,8 @@
 //! acme_client.rs
 //! ACME 客户端实现
+use crate::account_key::AcmeAccountKey;
 use anyhow::Result;
 use base64::Engine;
-use openssl::{
-    pkey::{PKey, Private},
-    rsa::Rsa,
-    x509::{X509NameBuilder, X509ReqBuilder, extension::SubjectAlternativeName},
-};
 use rcgen::{KeyPair, PKCS_ECDSA_P256_SHA256};
 use reqwest;
 use rustls::crypto::ring::sign::any_ecdsa_type;
@@ -63,7 +59,7 @@ impl NonceManager {
 
 struct AccountInner {
     email: String,
-    key: PKey<Private>,
+    key: AcmeAccountKey,
     kid: RwLock<Option<String>>,
 }
 
@@ -85,12 +81,11 @@ impl Clone for AcmeAccount {
 
 impl Into<AccountConfig> for AcmeAccount {
     fn into(self) -> AccountConfig {
-        let key_pem = self
+        let key_str = self
             .inner
             .key
-            .private_key_to_pem_pkcs8()
+            .to_pkcs8_pem()
             .expect("Failed to encode private key to PEM");
-        let key_str = String::from_utf8(key_pem).expect("Failed to convert PEM to string");
 
         AccountConfig {
             email: self.inner.email.clone(),
@@ -102,9 +97,8 @@ impl Into<AccountConfig> for AcmeAccount {
 
 impl From<AccountConfig> for AcmeAccount {
     fn from(inner: AccountConfig) -> Self {
-        let key_pem = inner.key.as_bytes();
-        let key =
-            PKey::private_key_from_pem(key_pem).expect("Failed to parse private key from PEM");
+        let key = AcmeAccountKey::from_pkcs8_pem(&inner.key)
+            .expect("Failed to parse private key from PEM");
 
         Self {
             inner: Arc::new(AccountInner {
@@ -133,8 +127,7 @@ impl std::fmt::Display for AcmeAccount {
 impl AcmeAccount {
     pub fn new(email: String) -> Self {
         info!("generate acme account key for {}", email);
-        let rsa = Rsa::generate(2048).unwrap();
-        let key = PKey::from_rsa(rsa).unwrap();
+        let key = AcmeAccountKey::generate_rsa2048().unwrap();
 
         Self {
             inner: Arc::new(AccountInner {
@@ -200,7 +193,7 @@ impl AcmeAccount {
         &self.inner.email
     }
 
-    pub fn key(&self) -> &PKey<Private> {
+    pub(crate) fn key(&self) -> &AcmeAccountKey {
         &self.inner.key
     }
 
@@ -563,36 +556,8 @@ impl AcmeClient {
     ) -> Result<serde_json::Value> {
         let payload_str = serde_json::to_string(payload)?;
         let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload_str);
-
-        let protected = serde_json::json!({
-            "alg": "RS256",
-            "nonce": nonce,
-            "url": url,
-            "jwk": {  // 对于新账户注册，使用 jwk 而不是 kid
-                "kty": "RSA",
-                "n": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(self.account().key().rsa()?.n().to_vec()),
-                "e": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(self.account().key().rsa()?.e().to_vec()),
-            }
-        });
-
-        let protected_str = serde_json::to_string(&protected)?;
-        let protected_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(protected_str);
-
-        let signing_input = format!("{}.{}", protected_b64, payload_b64);
-        let mut signer = openssl::sign::Signer::new(
-            openssl::hash::MessageDigest::sha256(),
-            &self.account().key(),
-        )?;
-        let mut signature = vec![0; signer.len()?];
-        signer.sign_oneshot(&mut signature, signing_input.as_bytes())?;
-
-        let signature_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signature);
-
-        Ok(serde_json::json!({
-            "protected": protected_b64,
-            "payload": payload_b64,
-            "signature": signature_b64,
-        }))
+        let protected = self.build_protected_header(url, nonce, true)?;
+        self.sign_jws(protected, payload_b64)
     }
 
     // 新增方法
@@ -662,22 +627,57 @@ impl AcmeClient {
 
     fn compute_key_authorization(&self, token: &str) -> Result<String> {
         // 计算 key authorization: token + "." + base64url(JWK thumbprint)
-        let jwk = serde_json::json!({
-            "kty": "RSA",
-            "n": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(self.account().key().rsa()?.n().to_vec()),
-            "e": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(self.account().key().rsa()?.e().to_vec()),
-        });
-
-        let jwk_str = serde_json::to_string(&jwk)?;
-        let mut hasher = openssl::sha::Sha256::new();
-        hasher.update(jwk_str.as_bytes());
-        let thumbprint = hasher.finish();
+        let thumbprint = self.account().key().thumbprint()?;
 
         Ok(format!(
             "{}.{}",
             token,
             base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(thumbprint)
         ))
+    }
+
+    fn build_protected_header(
+        &self,
+        url: &str,
+        nonce: &str,
+        force_jwk: bool,
+    ) -> Result<serde_json::Value> {
+        if !force_jwk {
+            if let Some(kid) = self.inner.account.kid() {
+                return Ok(serde_json::json!({
+                    "alg": self.account().key().alg(),
+                    "kid": kid,
+                    "nonce": nonce,
+                    "url": url
+                }));
+            }
+        }
+
+        Ok(serde_json::json!({
+            "alg": self.account().key().alg(),
+            "nonce": nonce,
+            "url": url,
+            "jwk": self.account().key().jwk()
+        }))
+    }
+
+    fn sign_jws(
+        &self,
+        protected: serde_json::Value,
+        payload_b64: String,
+    ) -> Result<serde_json::Value> {
+        let protected_str = serde_json::to_string(&protected)?;
+        let protected_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(protected_str);
+
+        let signing_input = format!("{}.{}", protected_b64, payload_b64);
+        let signature = self.account().key().sign(signing_input.as_bytes())?;
+        let signature_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signature);
+
+        Ok(serde_json::json!({
+            "protected": protected_b64,
+            "payload": payload_b64,
+            "signature": signature_b64,
+        }))
     }
 
     fn compute_key_authorization_hash(&self, token: &str) -> Result<String> {
@@ -954,30 +954,23 @@ impl AcmeClient {
     }
 
     fn generate_csr(&self, domains: &[String]) -> Result<(Vec<u8>, Vec<u8>)> {
-        let rsa = Rsa::generate(2048)?;
-        let pkey = PKey::from_rsa(rsa)?;
-
-        let mut builder = X509ReqBuilder::new()?;
-        builder.set_pubkey(&pkey)?;
-
-        let mut name_builder = X509NameBuilder::new()?;
-        name_builder.append_entry_by_text("CN", &domains[0])?;
-        builder.set_subject_name(&name_builder.build())?;
-
-        if !domains.is_empty() {
-            let mut san = SubjectAlternativeName::new();
-            for domain in domains {
-                san.dns(domain);
-            }
-            let ext = san.build(&builder.x509v3_context(None))?;
-            let mut stack = openssl::stack::Stack::new()?;
-            stack.push(ext)?;
-            builder.add_extensions(&stack)?;
+        if domains.is_empty() {
+            return Err(anyhow::anyhow!("generate csr failed: empty domain list"));
         }
 
-        builder.sign(&pkey, openssl::hash::MessageDigest::sha256())?;
+        let mut params = rcgen::CertificateParams::new(domains.to_vec())?;
+        params.distinguished_name = rcgen::DistinguishedName::new();
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, domains[0].clone());
 
-        Ok((builder.build().to_der()?, pkey.private_key_to_pem_pkcs8()?))
+        let key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)?;
+        let csr = params.serialize_request(&key_pair)?;
+
+        Ok((
+            csr.der().as_ref().to_vec(),
+            key_pair.serialize_pem().into_bytes(),
+        ))
     }
 
     /// 发送签名的POST请求并处理响应
@@ -1135,90 +1128,14 @@ impl AcmeClient {
     ) -> Result<serde_json::Value> {
         let payload_str = serde_json::to_string(payload)?;
         let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload_str);
-
-        let protected = if let Some(kid) = self.inner.account.kid() {
-            // 已注册账户使用 kid
-            serde_json::json!({
-                "alg": "RS256",
-                "kid": kid,
-                "nonce": nonce,
-                "url": url
-            })
-        } else {
-            // 未注册账户使用 jwk
-            serde_json::json!({
-                "alg": "RS256",
-                "nonce": nonce,
-                "url": url,
-                "jwk": {
-                    "kty": "RSA",
-                    "n": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(self.account().key().rsa()?.n().to_vec()),
-                    "e": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(self.account().key().rsa()?.e().to_vec()),
-                }
-            })
-        };
-
-        let protected_str = serde_json::to_string(&protected)?;
-        let protected_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(protected_str);
-
-        let signing_input = format!("{}.{}", protected_b64, payload_b64);
-        let mut signer = openssl::sign::Signer::new(
-            openssl::hash::MessageDigest::sha256(),
-            &self.account().key(),
-        )?;
-        let mut signature = vec![0; signer.len()?];
-        signer.sign_oneshot(&mut signature, signing_input.as_bytes())?;
-
-        let signature_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signature);
-
-        Ok(serde_json::json!({
-            "protected": protected_b64,
-            "payload": payload_b64,
-            "signature": signature_b64,
-        }))
+        let protected = self.build_protected_header(url, nonce, false)?;
+        self.sign_jws(protected, payload_b64)
     }
 
     fn sign_request_post_as_get(&self, url: &str, nonce: &str) -> Result<serde_json::Value> {
         let payload_b64 = String::new();
-
-        let protected = if let Some(kid) = self.inner.account.kid() {
-            serde_json::json!({
-                "alg": "RS256",
-                "kid": kid,
-                "nonce": nonce,
-                "url": url
-            })
-        } else {
-            serde_json::json!({
-                "alg": "RS256",
-                "nonce": nonce,
-                "url": url,
-                "jwk": {
-                    "kty": "RSA",
-                    "n": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(self.account().key().rsa()?.n().to_vec()),
-                    "e": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(self.account().key().rsa()?.e().to_vec()),
-                }
-            })
-        };
-
-        let protected_str = serde_json::to_string(&protected)?;
-        let protected_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(protected_str);
-
-        let signing_input = format!("{}.{}", protected_b64, payload_b64);
-        let mut signer = openssl::sign::Signer::new(
-            openssl::hash::MessageDigest::sha256(),
-            &self.account().key(),
-        )?;
-        let mut signature = vec![0; signer.len()?];
-        signer.sign_oneshot(&mut signature, signing_input.as_bytes())?;
-
-        let signature_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signature);
-
-        Ok(serde_json::json!({
-            "protected": protected_b64,
-            "payload": payload_b64,
-            "signature": signature_b64,
-        }))
+        let protected = self.build_protected_header(url, nonce, false)?;
+        self.sign_jws(protected, payload_b64)
     }
 
     /// 发送签名的POST请求，不需要响应体

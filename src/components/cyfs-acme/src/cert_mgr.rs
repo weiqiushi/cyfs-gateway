@@ -3,7 +3,6 @@ use crate::default_challenge_responder::DefaultChallengeResponder;
 use crate::{Challenge, ChallengeData, ChallengeType};
 use anyhow::Result;
 use log::*;
-use openssl::x509::X509;
 use rand::Rng;
 use rustls::crypto::ring::sign::any_supported_type;
 use rustls::pki_types::PrivateKeyDer;
@@ -135,21 +134,15 @@ impl CertStub {
     }
 
     fn get_cert_expiry(cert_data: &[u8]) -> Result<chrono::DateTime<chrono::Utc>> {
-        let cert = X509::from_pem(cert_data)?;
-        let not_after = cert.not_after().to_string();
-        // info!("cert expiry raw: {}", not_after);
+        let (_, pem) = x509_parser::pem::parse_x509_pem(cert_data)
+            .map_err(|e| anyhow::anyhow!("parse certificate pem failed: {}", e))?;
+        let cert = pem
+            .parse_x509()
+            .map_err(|e| anyhow::anyhow!("parse certificate der failed: {}", e))?;
+        let not_after = cert.validity().not_after.to_datetime();
 
-        // 移除最后的时区名称，因为证书时间总是 UTC
-        let datetime_str = not_after
-            .rsplitn(2, ' ')
-            .nth(1)
-            .ok_or_else(|| anyhow::anyhow!("Invalid datetime format"))?;
-
-        let expires = chrono::NaiveDateTime::parse_from_str(datetime_str, "%b %e %H:%M:%S %Y")?;
-        Ok(chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(
-            expires,
-            chrono::Utc,
-        ))
+        chrono::DateTime::<chrono::Utc>::from_timestamp(not_after.unix_timestamp(), 0)
+            .ok_or_else(|| anyhow::anyhow!("invalid certificate expiry timestamp"))
     }
 
     pub fn get_cert(&self) -> Option<Arc<CertifiedKey>> {

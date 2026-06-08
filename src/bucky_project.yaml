@@ -40,5 +40,3 @@ apps:
       cyfs_gateway: bin/cyfs-gateway/
     data_paths: []
     clean_paths: []
-rust_env:
-  OPENSSL_STATIC: "1"
