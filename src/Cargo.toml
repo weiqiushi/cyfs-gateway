@@ -58,7 +58,7 @@ clap = "4.5.54"
 chrono = { version = "0.4.39", features = ["serde"] }
 # 加密
 sha2 = "0.10.9"
-jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
+jsonwebtoken = { version = "10", features = ["rust_crypto"] }
 # TLS
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 tokio-rustls = "0.26.1"
