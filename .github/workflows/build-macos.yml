@@ -38,7 +38,7 @@ jobs:
       run: pip install "buckyos-devkit @ git+https://github.com/buckyos/buckyos-devkit.git"
     - name: build buckyos
       working-directory: ./src
-      run: sudo buckyos-build
+      run: sudo buckyos-build --app=cyfs-gateway-publish
     - name: Tar Rootfs
       run: 
         cd ./src/rootfs && tar -czvf ../../gateway-apple-${{inputs.arch == 'x86_64' && 'amd64' || 'aarch64'}}.tar.gz .

@@ -32,5 +32,13 @@ apps:
       - params.json
       - local_dns.toml
     clean_paths: []
+  cyfs-gateway-publish:
+    name: cyfs-gateway-publish
+    rootfs: rootfs/
+    default_target_rootfs: ${BUCKYOS_ROOT}
+    modules:
+      cyfs_gateway: bin/cyfs-gateway/
+    data_paths: []
+    clean_paths: []
 rust_env:
   OPENSSL_STATIC: "1"
