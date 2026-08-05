@@ -1,0 +1,121 @@
+name: Build BNS WebUI
+
+on:
+  workflow_dispatch:
+    inputs:
+      bns_server_url:
+        description: BNS server base URL; use / for same-origin deployment
+        required: true
+        type: string
+        default: https://bns.buckyos.io
+      chain_id:
+        description: Expected EVM chain ID
+        required: true
+        type: string
+        default: "31337"
+      contract_address:
+        description: Expected BNS proxy contract address
+        required: true
+        type: string
+        default: "0x700b6a60ce7eaaea56f065753d8dcb9653dbad35"
+  workflow_call:
+    inputs:
+      bns_server_url:
+        description: BNS server base URL; use / for same-origin deployment
+        required: false
+        type: string
+        default: https://bns.buckyos.io
+      chain_id:
+        description: Expected EVM chain ID
+        required: false
+        type: string
+        default: "31337"
+      contract_address:
+        description: Expected BNS proxy contract address
+        required: false
+        type: string
+        default: "0x700b6a60ce7eaaea56f065753d8dcb9653dbad35"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and publish static site
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: "10.15.0"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+
+      - name: Install dependencies
+        working-directory: src/apps/bns-webui
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Test
+        working-directory: src/apps/bns-webui
+        run: pnpm test
+
+      - name: Validate production configuration
+        env:
+          BNS_SERVER_URL: ${{ inputs.bns_server_url }}
+          BNS_CHAIN_ID: ${{ inputs.chain_id }}
+          BNS_CONTRACT_ADDRESS: ${{ inputs.contract_address }}
+        run: |
+          if [[ "$BNS_SERVER_URL" != "/" && ! "$BNS_SERVER_URL" =~ ^https?://[^[:space:]]+$ ]]; then
+            echo "bns_server_url must be / or an absolute HTTP(S) URL" >&2
+            exit 1
+          fi
+          if [[ ! "$BNS_CHAIN_ID" =~ ^[1-9][0-9]*$ ]]; then
+            echo "chain_id must be a positive integer" >&2
+            exit 1
+          fi
+          if [[ ! "$BNS_CONTRACT_ADDRESS" =~ ^0x[0-9a-fA-F]{40}$ ]]; then
+            echo "contract_address must be a 20-byte hex address" >&2
+            exit 1
+          fi
+
+      - name: Build production site
+        working-directory: src/apps/bns-webui
+        env:
+          VITE_BNS_SERVER_URL: ${{ inputs.bns_server_url }}
+          VITE_BNS_CHAIN_ID: ${{ inputs.chain_id }}
+          VITE_BNS_CONTRACT_ADDRESS: ${{ inputs.contract_address }}
+        run: pnpm run build
+
+      - name: Read project version
+        id: project
+        working-directory: src
+        run: |
+          version="$(awk '$1 == "version:" { print $2; exit }' bucky_project.yaml)"
+          if [ -z "$version" ]; then
+            echo "Unable to read version from bucky_project.yaml" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Package static site
+        env:
+          VERSION: ${{ steps.project.outputs.version }}
+        run: |
+          tar -C src/apps/bns-webui/dist -czf "bns-webui-${VERSION}.tar.gz" .
+          sha256sum "bns-webui-${VERSION}.tar.gz" > "bns-webui-${VERSION}.tar.gz.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bns-webui-${{ steps.project.outputs.version }}
+          path: |
+            bns-webui-${{ steps.project.outputs.version }}.tar.gz
+            bns-webui-${{ steps.project.outputs.version }}.tar.gz.sha256
+          if-no-files-found: error
